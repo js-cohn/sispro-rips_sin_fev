@@ -2,11 +2,14 @@
 
 import argparse
 import gzip
+import http.client
 import json
 import os
+import socket
 import ssl
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -18,6 +21,25 @@ ROOT_DIR = Path(__file__).resolve().parent
 ENV_FILE = ROOT_DIR / ".env"
 DEFAULT_BASE_URL = "https://localhost:9443"
 DEFAULT_COMPOSE_FILE = ROOT_DIR / "runtime" / "docker-compose.yml"
+TRANSIENT_HTTP_STATUSES = {502, 503, 504}
+DEFAULT_HTTP_TIMEOUT_SECONDS = 60
+DEFAULT_API_READY_TIMEOUT_SECONDS = 300
+DEFAULT_API_READY_RETRY_INTERVAL_SECONDS = 3
+DEFAULT_SEND_RETRY_ATTEMPTS = 3
+DEFAULT_SEND_RETRY_INTERVAL_SECONDS = 2
+
+
+class RequestTransportError(RuntimeError):
+    def __init__(self, message, *, reason=None):
+        super().__init__(message)
+        self.reason = reason
+
+
+class RetryableHttpError(RuntimeError):
+    def __init__(self, status, payload):
+        super().__init__(f"Transient HTTP {status}: {payload}")
+        self.status = status
+        self.payload = payload
 
 
 def load_env_file(env_file):
@@ -54,6 +76,11 @@ def env_int(name):
     return int(value) if value is not None else None
 
 
+def env_int_value(name, default):
+    value = env_int(name)
+    return default if value is None else value
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Load .env, start the local FEV-RIPS Docker stack, and send a batch of RIPS sin factura reports."
@@ -85,13 +112,19 @@ def create_ssl_context(verify_tls):
     return ssl.create_default_context() if verify_tls else ssl._create_unverified_context()
 
 
-def request_bytes(url, method, body=None, headers=None, context=None):
+def request_bytes(url, method, body=None, headers=None, context=None, timeout_seconds=DEFAULT_HTTP_TIMEOUT_SECONDS):
     request = urllib.request.Request(url, data=body, headers=headers or {}, method=method)
     try:
-        with urllib.request.urlopen(request, context=context) as response:
+        with urllib.request.urlopen(request, context=context, timeout=timeout_seconds) as response:
             return response.status, dict(response.headers), response.read()
     except urllib.error.HTTPError as exc:
         return exc.code, dict(exc.headers), exc.read()
+    except (TimeoutError, socket.timeout) as exc:
+        raise RequestTransportError("Request timed out", reason=exc) from exc
+    except http.client.RemoteDisconnected as exc:
+        raise RequestTransportError("Remote endpoint closed the connection", reason=exc) from exc
+    except urllib.error.URLError as exc:
+        raise RequestTransportError("Request transport error", reason=exc.reason or exc) from exc
 
 
 def parse_response_body(body):
@@ -122,6 +155,34 @@ def discover_reports(batch_dir):
 def detect_default_nit(report_files):
     first_report = load_json(report_files[0])
     return first_report.get("numDocumentoIdObligado")
+
+
+def is_retryable_http_status(status):
+    return status in TRANSIENT_HTTP_STATUSES
+
+
+def format_transport_error(exc):
+    reason = exc.reason if isinstance(exc, RequestTransportError) else exc
+    return str(reason or exc)
+
+
+def is_retryable_startup_transport_error(exc):
+    reason = exc.reason if isinstance(exc, RequestTransportError) else exc
+    if isinstance(reason, (TimeoutError, socket.timeout, ConnectionRefusedError, ConnectionResetError, ConnectionAbortedError)):
+        return True
+    if isinstance(reason, OSError) and getattr(reason, "errno", None) in {61, 111}:
+        return True
+    text = str(reason).lower()
+    return any(token in text for token in {"connection refused", "timed out", "connection reset", "connection aborted"})
+
+
+def is_retryable_send_transport_error(exc):
+    reason = exc.reason if isinstance(exc, RequestTransportError) else exc
+    if isinstance(reason, ConnectionRefusedError):
+        return True
+    if isinstance(reason, OSError) and getattr(reason, "errno", None) in {61, 111}:
+        return True
+    return "connection refused" in str(reason).lower()
 
 
 def extract_token(payload):
@@ -164,6 +225,7 @@ def login(
     tipo_mecanismo_validacion,
     reps,
     context,
+    http_timeout_seconds,
 ):
     payload = {
         "persona": {
@@ -189,8 +251,11 @@ def login(
         body=body,
         headers={"Content-Type": "application/json"},
         context=context,
+        timeout_seconds=http_timeout_seconds,
     )
     parsed = parse_response_body(raw_body)
+    if is_retryable_http_status(status):
+        raise RetryableHttpError(status, parsed)
     if not 200 <= status < 300:
         raise RuntimeError(f"LoginSISPRO failed with HTTP {status}: {parsed}")
     if not isinstance(parsed, dict):
@@ -198,6 +263,55 @@ def login(
     if parsed.get("login") is False:
         raise RuntimeError(f"LoginSISPRO rejected the credentials/payload: {parsed}")
     return extract_token(parsed)
+
+
+def login_with_retries(
+    base_url,
+    identification_type,
+    identification_number,
+    password,
+    nit,
+    tipo_usuario,
+    tipo_mecanismo_validacion,
+    reps,
+    context,
+    http_timeout_seconds,
+    ready_timeout_seconds,
+    retry_interval_seconds,
+):
+    deadline = time.monotonic() + max(0, ready_timeout_seconds)
+    attempt = 0
+
+    while True:
+        attempt += 1
+        try:
+            return login(
+                base_url,
+                identification_type,
+                identification_number,
+                password,
+                nit,
+                tipo_usuario,
+                tipo_mecanismo_validacion,
+                reps,
+                context,
+                http_timeout_seconds,
+            )
+        except RetryableHttpError as exc:
+            message = f"HTTP {exc.status}"
+        except RequestTransportError as exc:
+            if not is_retryable_startup_transport_error(exc):
+                raise
+            message = format_transport_error(exc)
+        except RuntimeError:
+            raise
+
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"API not ready before timeout: {message}")
+
+        wait_seconds = min(retry_interval_seconds, max(0, deadline - time.monotonic()))
+        print(f"[WAIT] API not ready yet ({message}). Retrying in {wait_seconds:.0f}s...")
+        time.sleep(wait_seconds)
 
 
 def build_request_body(rips_payload):
@@ -226,8 +340,32 @@ def summarize_validation(parsed_response):
     return None
 
 
-def send_report(base_url, token, report_path, context):
-    report_payload = load_json(report_path)
+def build_result(report_payload, status_label, http_status, parsed, error_message=None):
+    result_state = parsed.get("ResultState") if isinstance(parsed, dict) else None
+    response = parsed
+    if error_message:
+        response = {"error": error_message, "response": parsed}
+    return {
+        "status": status_label,
+        "http_status": http_status,
+        "numNota": report_payload.get("numNota"),
+        "numDocumentoIdObligado": report_payload.get("numDocumentoIdObligado"),
+        "ResultState": result_state,
+        "Modulo": parsed.get("Modulo") if isinstance(parsed, dict) else None,
+        "ProcesoId": parsed.get("ProcesoId") if isinstance(parsed, dict) else None,
+        "CodigoUnicoValidacion": parsed.get("CodigoUnicoValidacion") if isinstance(parsed, dict) else None,
+        "validation_summary": summarize_validation(parsed),
+        "response": response,
+    }
+
+
+def send_report(
+    base_url,
+    token,
+    report_payload,
+    context,
+    http_timeout_seconds,
+):
     body = build_request_body(report_payload)
     status, _, raw_body = request_bytes(
         f"{base_url.rstrip('/')}/api/PaquetesFevRips/CargarRipsSinFactura",
@@ -239,8 +377,11 @@ def send_report(base_url, token, report_path, context):
             "Content-Encoding": "gzip",
         },
         context=context,
+        timeout_seconds=http_timeout_seconds,
     )
     parsed = parse_response_body(raw_body)
+    if is_retryable_http_status(status):
+        raise RetryableHttpError(status, parsed)
     result_state = parsed.get("ResultState") if isinstance(parsed, dict) else None
     if 200 <= status < 300 and result_state is True:
         status_label = "ok"
@@ -248,18 +389,51 @@ def send_report(base_url, token, report_path, context):
         status_label = "rejected"
     else:
         status_label = "error"
-    return {
-        "status": status_label,
-        "http_status": status,
-        "numNota": report_payload.get("numNota"),
-        "numDocumentoIdObligado": report_payload.get("numDocumentoIdObligado"),
-        "ResultState": result_state,
-        "Modulo": parsed.get("Modulo") if isinstance(parsed, dict) else None,
-        "ProcesoId": parsed.get("ProcesoId") if isinstance(parsed, dict) else None,
-        "CodigoUnicoValidacion": parsed.get("CodigoUnicoValidacion") if isinstance(parsed, dict) else None,
-        "validation_summary": summarize_validation(parsed),
-        "response": parsed,
-    }
+    return build_result(report_payload, status_label, status, parsed)
+
+
+def send_report_with_retries(
+    base_url,
+    token,
+    report_path,
+    context,
+    http_timeout_seconds,
+    retry_attempts,
+    retry_interval_seconds,
+):
+    report_payload = load_json(report_path)
+
+    for attempt in range(1, retry_attempts + 1):
+        try:
+            return send_report(
+                base_url,
+                token,
+                report_payload,
+                context,
+                http_timeout_seconds,
+            )
+        except RetryableHttpError as exc:
+            if attempt == retry_attempts:
+                return build_result(
+                    report_payload,
+                    "error",
+                    exc.status,
+                    exc.payload,
+                    error_message=f"Transient HTTP error after {attempt} attempt(s)",
+                )
+            print(f"[RETRY] {report_path.name} -> transient HTTP {exc.status}, retrying in {retry_interval_seconds}s...")
+            time.sleep(retry_interval_seconds)
+        except RequestTransportError as exc:
+            if not is_retryable_send_transport_error(exc) or attempt == retry_attempts:
+                return build_result(
+                    report_payload,
+                    "error",
+                    0,
+                    None,
+                    error_message=format_transport_error(exc),
+                )
+            print(f"[RETRY] {report_path.name} -> {format_transport_error(exc)}, retrying in {retry_interval_seconds}s...")
+            time.sleep(retry_interval_seconds)
 
 
 def sidecar_path(report_path):
@@ -319,6 +493,23 @@ def main():
     tipo_mecanismo_validacion = env_int("SISPRO_TIPO_MECANISMO_VALIDACION")
     reps = env_bool("SISPRO_REPS", False)
     pause_between = sys.stdin.isatty() and env_bool("FEVRIPS_PAUSE_BETWEEN", True)
+    http_timeout_seconds = max(1, env_int_value("FEVRIPS_HTTP_TIMEOUT_SECONDS", DEFAULT_HTTP_TIMEOUT_SECONDS))
+    api_ready_timeout_seconds = max(0, env_int_value("FEVRIPS_API_READY_TIMEOUT_SECONDS", DEFAULT_API_READY_TIMEOUT_SECONDS))
+    api_ready_retry_interval_seconds = max(
+        1,
+        env_int_value(
+        "FEVRIPS_API_READY_RETRY_INTERVAL_SECONDS",
+        DEFAULT_API_READY_RETRY_INTERVAL_SECONDS,
+        ),
+    )
+    send_retry_attempts = max(1, env_int_value("FEVRIPS_SEND_RETRY_ATTEMPTS", DEFAULT_SEND_RETRY_ATTEMPTS))
+    send_retry_interval_seconds = max(
+        1,
+        env_int_value(
+        "FEVRIPS_SEND_RETRY_INTERVAL_SECONDS",
+        DEFAULT_SEND_RETRY_INTERVAL_SECONDS,
+        ),
+    )
 
     batch_dir = args.batch_dir.expanduser().resolve()
     if not batch_dir.is_dir():
@@ -353,7 +544,7 @@ def main():
 
     password = env_value("SISPRO_PASSWORD") or getpass("SISPRO password: ")
     context = create_ssl_context(args.verify_tls)
-    token = login(
+    token = login_with_retries(
         base_url,
         identification_type,
         identification_number,
@@ -363,6 +554,9 @@ def main():
         tipo_mecanismo_validacion,
         reps,
         context,
+        http_timeout_seconds,
+        api_ready_timeout_seconds,
+        api_ready_retry_interval_seconds,
     )
 
     ok_count = 0
@@ -371,7 +565,15 @@ def main():
 
     for index, report_path in enumerate(pending_files, 1):
         relative_path = report_path.relative_to(batch_dir)
-        result = send_report(base_url, token, report_path, context)
+        result = send_report_with_retries(
+            base_url,
+            token,
+            report_path,
+            context,
+            http_timeout_seconds,
+            send_retry_attempts,
+            send_retry_interval_seconds,
+        )
         print_result(relative_path, result)
 
         if result["status"] in {"ok", "rejected"}:

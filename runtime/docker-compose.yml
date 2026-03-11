@@ -7,11 +7,15 @@ volumes:
 
 services:
   fevrips-proxy:
-    container_name: fevrips-proxy
     image: python:3.12-slim
     restart: unless-stopped
     command: ["python", "/srv/fevrips_proxy.py"]
     working_dir: /srv
+    environment:
+      FEVRIPS_PROXY_TIMEOUT: ${FEVRIPS_PROXY_TIMEOUT:-900}
+      FEVRIPS_PROXY_DISABLE_CACHE: ${FEVRIPS_PROXY_DISABLE_CACHE:-}
+      FEVRIPS_PROXY_TABLE_CACHE_TTL_SECONDS: ${FEVRIPS_PROXY_TABLE_CACHE_TTL_SECONDS:-300}
+      FEVRIPS_PROXY_METADATA_CACHE_TTL_SECONDS: ${FEVRIPS_PROXY_METADATA_CACHE_TTL_SECONDS:-0}
     volumes:
       - ./fevrips_proxy.py:/srv/fevrips_proxy.py:ro
       - ./proxy-cache:/cache
@@ -19,7 +23,6 @@ services:
       - fevrips-net
 
   fevrips-db:
-    container_name: fevrips-db
     image: mcr.microsoft.com/mssql/server:2022-CU12-ubuntu-22.04
     platform: linux/amd64
     restart: unless-stopped
@@ -35,7 +38,6 @@ services:
       - fevrips-net
 
   fevrips-api:
-    container_name: fevrips-api
     image: crmspsgovcoprd.azurecr.io/production-fevrips-apilocal
     platform: linux/amd64
     restart: unless-stopped

@@ -127,6 +127,14 @@ Comportamiento por defecto:
 - `--no-compose`: no levanta Docker antes del envío
 - `--verify-tls`: valida TLS en lugar de omitir la verificación del certificado local
 
+## Verificación rápida
+
+```bash
+python3 -m unittest test_runtime_behaviors.py
+```
+
+Valida la lógica local de caché, reintentos y nombres de sidecar. No realiza envíos a SISPRO.
+
 ## Variables de entorno
 
 Requeridas:
@@ -150,3 +158,15 @@ Opcionales:
 - `FEVRIPS_CERT_PASSWORD`
 
 Todas estas variables se leen desde `.env`. El script no acepta banderas que las sobrescriban.
+
+Variables avanzadas de timeout, reintento y caché existen como overrides opcionales, pero no aparecen en `.env.example` porque el flujo normal puede usar los valores internos del código:
+
+- `FEVRIPS_HTTP_TIMEOUT_SECONDS`
+- `FEVRIPS_API_READY_TIMEOUT_SECONDS`
+- `FEVRIPS_API_READY_RETRY_INTERVAL_SECONDS`
+- `FEVRIPS_SEND_RETRY_ATTEMPTS`
+- `FEVRIPS_SEND_RETRY_INTERVAL_SECONDS`
+- `FEVRIPS_PROXY_TIMEOUT`
+- `FEVRIPS_PROXY_DISABLE_CACHE`
+- `FEVRIPS_PROXY_TABLE_CACHE_TTL_SECONDS`
+- `FEVRIPS_PROXY_METADATA_CACHE_TTL_SECONDS`
