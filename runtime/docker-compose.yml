@@ -1,0 +1,56 @@
+networks:
+  fevrips-net:
+    driver: bridge
+
+volumes:
+  fevrips-db-data:
+
+services:
+  fevrips-proxy:
+    container_name: fevrips-proxy
+    image: python:3.12-slim
+    restart: unless-stopped
+    command: ["python", "/srv/fevrips_proxy.py"]
+    working_dir: /srv
+    volumes:
+      - ./fevrips_proxy.py:/srv/fevrips_proxy.py:ro
+      - ./proxy-cache:/cache
+    networks:
+      - fevrips-net
+
+  fevrips-db:
+    container_name: fevrips-db
+    image: mcr.microsoft.com/mssql/server:2022-CU12-ubuntu-22.04
+    platform: linux/amd64
+    restart: unless-stopped
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:-FEVRIPS1*}
+      MSSQL_MEMORY_LIMIT_MB: "9000"
+      MSSQL_COLLATION: SQL_Latin1_General_CP1_CI_AS
+      MSSQL_PID: Enterprise
+    volumes:
+      - fevrips-db-data:/var/opt/mssql
+    networks:
+      - fevrips-net
+
+  fevrips-api:
+    container_name: fevrips-api
+    image: crmspsgovcoprd.azurecr.io/production-fevrips-apilocal
+    platform: linux/amd64
+    restart: unless-stopped
+    depends_on:
+      - fevrips-db
+      - fevrips-proxy
+    ports:
+      - "9443:5100"
+    environment:
+      ASPNETCORE_ENVIRONMENT: DockerProduction
+      ASPNETCORE_Kestrel__Certificates__Default__Password: ${FEVRIPS_CERT_PASSWORD:-fevrips2024*}
+      ASPNETCORE_Kestrel__Certificates__Default__Path: /certificates/fevripsapilocal.pfx
+      AppSettings__BaseUrlWebApi: http://fevrips-proxy:8080/fevrips-api/api/
+      AppSettings__FEVRIPSExternalSyncQueryAPIURL: http://fevrips-proxy:8080/externalsync-queryapi
+    volumes:
+      - ./certificates:/certificates:ro
+    networks:
+      - fevrips-net

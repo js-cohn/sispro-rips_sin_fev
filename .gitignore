@@ -1,0 +1,12 @@
+.DS_Store
+__pycache__/
+*.pyc
+.env
+
+# Local runtime artifacts
+runtime/certificates/
+runtime/proxy-cache/
+
+# Local working data
+batches/
+documentation/
