@@ -95,7 +95,7 @@ macOS / Linux:
 Ejemplo:
 
 ```bash
-./send_rips_sin_factura.py batches/2026-04
+./send_rips_sin_factura.py batches/2001-01
 ```
 
 Windows:
