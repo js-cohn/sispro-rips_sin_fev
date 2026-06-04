@@ -101,7 +101,7 @@ Ejemplo:
 Windows:
 
 ```powershell
-python .\send_rips_sin_factura.py batches\2026-04
+python .\send_rips_sin_factura.py batches\2001-01
 ```
 
 Comportamiento por defecto:
@@ -118,9 +118,9 @@ Comportamiento por defecto:
 ## Opciones útiles
 
 ```bash
-./send_rips_sin_factura.py batches/2026-04 --force
-./send_rips_sin_factura.py batches/2026-04 --no-compose
-./send_rips_sin_factura.py batches/2026-04 --verify-tls
+./send_rips_sin_factura.py batches/2001-01 --force
+./send_rips_sin_factura.py batches/2001-01 --no-compose
+./send_rips_sin_factura.py batches/2001-01 --verify-tls
 ```
 
 - `--force`: reenvía reportes aunque ya exista su sidecar
