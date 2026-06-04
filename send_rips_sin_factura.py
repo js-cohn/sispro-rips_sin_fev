@@ -173,7 +173,7 @@ def is_retryable_startup_transport_error(exc):
     if isinstance(reason, OSError) and getattr(reason, "errno", None) in {61, 111}:
         return True
     text = str(reason).lower()
-    return any(token in text for token in {"connection refused", "timed out", "connection reset", "connection aborted"})
+    return any(token in text for token in {"connection refused", "timed out", "connection reset", "connection aborted", "eof occurred"})
 
 
 def is_retryable_send_transport_error(exc):
