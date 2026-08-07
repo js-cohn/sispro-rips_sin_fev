@@ -476,7 +476,17 @@ def maybe_pause(enabled):
 
 def ensure_compose_up(compose_file):
     subprocess.run(
+        ["docker", "compose", "-f", str(compose_file), "pull"],
+        check=True,
+        cwd=ROOT_DIR,
+    )
+    subprocess.run(
         ["docker", "compose", "-f", str(compose_file), "up", "-d"],
+        check=True,
+        cwd=ROOT_DIR,
+    )
+    subprocess.run(
+        ["docker", "image", "prune", "-f"],
         check=True,
         cwd=ROOT_DIR,
     )
@@ -574,6 +584,8 @@ def main():
             send_retry_attempts,
             send_retry_interval_seconds,
         )
+        if result is None:
+            raise RuntimeError(f"No result returned for {relative_path}")
         print_result(relative_path, result)
 
         if result["status"] in {"ok", "rejected"}:

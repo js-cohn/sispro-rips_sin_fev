@@ -344,6 +344,31 @@ class SenderRetryTests(unittest.TestCase):
 
 
 class SenderMainTests(unittest.TestCase):
+    def test_ensure_compose_up_pulls_before_up_and_prunes_images(self):
+        with mock.patch.object(sender.subprocess, "run") as run_mock:
+            sender.ensure_compose_up(Path("runtime/docker-compose.yml"))
+
+        self.assertEqual(
+            run_mock.call_args_list,
+            [
+                mock.call(
+                    ["docker", "compose", "-f", "runtime/docker-compose.yml", "pull"],
+                    check=True,
+                    cwd=sender.ROOT_DIR,
+                ),
+                mock.call(
+                    ["docker", "compose", "-f", "runtime/docker-compose.yml", "up", "-d"],
+                    check=True,
+                    cwd=sender.ROOT_DIR,
+                ),
+                mock.call(
+                    ["docker", "image", "prune", "-f"],
+                    check=True,
+                    cwd=sender.ROOT_DIR,
+                ),
+            ],
+        )
+
     def test_main_processes_one_report_and_writes_sidecar(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             batch_dir = Path(tmp_dir) / "batch"
