@@ -133,7 +133,7 @@ Comportamiento por defecto:
 python3 -m unittest test_runtime_behaviors.py
 ```
 
-Valida la lógica local de caché, reintentos y nombres de sidecar. No realiza envíos a SISPRO.
+Valida la lógica local de caché, reintentos y nombres de sidecar. No realiza envíos a SISPRO; también comprueba que el cliente Docker actual puede hablar con un daemon.
 
 ## Variables de entorno
 
